@@ -132,7 +132,7 @@ def main(
         print(f"Generating with seed {opts.seed}:\n{opts.source_prompt}")
         t0 = time.perf_counter()
 
-        opts.seed = None
+        # opts.seed = None
         if offload:
             ae = ae.cpu()
             torch.cuda.empty_cache()
