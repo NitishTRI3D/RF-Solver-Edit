@@ -8,6 +8,7 @@ import torch
 from einops import rearrange
 from fire import Fire
 from PIL import ExifTags, Image
+import json
 
 from flux.sampling import denoise, get_schedule, prepare, unpack
 from flux.util import (configs, embed_watermark, load_ae, load_clip,
@@ -17,6 +18,7 @@ from PIL import Image
 import numpy as np
 
 import os
+from myutils import resize_image
 
 NSFW_THRESHOLD = 0.85
 
@@ -97,8 +99,7 @@ def main(
         torch.cuda.empty_cache()
         ae.encoder.to(torch_device)
     
-    init_image = None
-    init_image = np.array(Image.open(args.source_img_dir).convert('RGB'))
+    init_image = resize_image(args.source_img_dir, 768)
     
     shape = init_image.shape
 
@@ -109,6 +110,7 @@ def main(
 
     width, height = init_image.shape[0], init_image.shape[1]
     init_image = encode(init_image, torch_device, ae)
+    print(init_image.shape)
 
     rng = torch.Generator(device="cpu")
     opts = SamplingOptions(
@@ -197,22 +199,43 @@ def main(
             x = x.clamp(-1, 1)
             x = embed_watermark(x.float())
             x = rearrange(x[0], "c h w -> h w c")
-
-            img = Image.fromarray((127.5 * (x + 1.0)).cpu().byte().numpy())
-            nsfw_score = [x["score"] for x in nsfw_classifier(img) if x["label"] == "nsfw"][0]
+            generated_img = Image.fromarray((127.5 * (x + 1.0)).cpu().byte().numpy())
             
-            if nsfw_score < NSFW_THRESHOLD:
-                exif_data = Image.Exif()
-                exif_data[ExifTags.Base.Software] = "AI generated;txt2img;flux"
-                exif_data[ExifTags.Base.Make] = "Black Forest Labs"
-                exif_data[ExifTags.Base.Model] = name
-                if add_sampling_metadata:
-                    exif_data[ExifTags.Base.ImageDescription] = source_prompt
-                img.save(fn, exif=exif_data, quality=95, subsampling=0)
-                idx += 1
-            else:
-                print("Your generated image may contain NSFW content.")
-
+            # Load original image for side-by-side comparison
+            original_img = Image.open(args.source_img_dir)
+            
+            # Resize original to match generated image size
+            original_img = original_img.resize(generated_img.size)
+            
+            # Create side-by-side image
+            combined_width = generated_img.size[0] * 2
+            combined_height = generated_img.size[1]
+            combined_img = Image.new('RGB', (combined_width, combined_height))
+            combined_img.paste(original_img, (0, 0))
+            combined_img.paste(generated_img, (generated_img.size[0], 0))
+            
+            # Save combined image
+            fn = output_name.format(idx=idx)
+            combined_img.save(fn, quality=95)
+            
+            # Save parameters to JSON
+            params = {
+                "img_shape": str(combined_img.size),
+                "source_prompt": opts.source_prompt,
+                "target_prompt": opts.target_prompt,
+                "guidance": opts.guidance,
+                "num_steps": opts.num_steps,
+                "seed": opts.seed,
+                "source_image": args.source_img_dir,
+                "model_name": name
+            }
+            
+            json_fn = fn.rsplit('.', 1)[0] + '.json'
+            with open(json_fn, 'w') as f:
+                json.dump(params, f, indent=4)
+            
+            idx += 1
+            
             if loop:
                 print("-" * 80)
                 opts = parse_prompt(opts)
